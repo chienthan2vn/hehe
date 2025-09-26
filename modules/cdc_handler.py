@@ -1,150 +1,120 @@
 """
 Change Data Capture (CDC) handler for MongoDB to RabbitMQ.
-Sends raw document data without chunking.
+Simply sends raw document data to queue for Bytewax processing.
 """
 
 import logging
-import json
 import time
-from typing import Dict, Any, List, Optional
-from pymongo import MongoClient
-from pymongo.collection import Collection
-from bson import ObjectId
+from typing import Dict, Any, Optional, Callable
 
 from config import config
 from modules.rabbitmq_handler import RabbitMQHandler
+from modules.pdf_extractor import PDFExtractor
 
 logger = logging.getLogger(__name__)
 
 class CDCHandler:
     """
-    Handles Change Data Capture from MongoDB to RabbitMQ.
-    Sends raw document data for processing by Bytewax pipeline.
+    Simple CDC handler: MongoDB → RabbitMQ → Bytewax
+    Only responsible for detecting changes and sending to queue.
     """
     
     def __init__(self):
-        self.mongo_client = MongoClient(config.mongo.uri)
-        self.db = self.mongo_client[config.mongo.database]
-        self.collection = self.db[config.mongo.collection]
+        self.pdf_extractor = PDFExtractor()
         self.rabbitmq_handler = RabbitMQHandler()
         
-        # Use different queue for raw documents
+        # Raw queue for unprocessed documents
         self.raw_queue = config.rabbitmq.queue + "_raw"
-        
-        # Ensure raw queue exists
         self._setup_raw_queue()
     
     def _setup_raw_queue(self):
         """Setup the raw document queue."""
         try:
-            # Declare raw queue
             self.rabbitmq_handler.channel.queue_declare(
                 queue=self.raw_queue, 
                 durable=True
             )
-            logger.info(f"Raw document queue setup: {self.raw_queue}")
+            logger.info(f"Raw document queue ready: {self.raw_queue}")
         except Exception as e:
             logger.error(f"Failed to setup raw queue: {e}")
             raise
     
-    def send_raw_document(self, document: Dict[str, Any]) -> bool:
+    def send_to_queue(self, document: Dict[str, Any]) -> bool:
         """
-        Send raw document to RabbitMQ for Bytewax processing.
+        Send raw document to queue for Bytewax processing.
         
         Args:
             document: MongoDB document
             
         Returns:
-            True if successful, False otherwise
+            True if successful
         """
         try:
-            # Prepare raw document message
+            # Simple message format for Bytewax
             raw_message = {
                 "document_id": str(document["_id"]),
                 "file_name": document.get("file_name", ""),
-                "file_path": document.get("file_path", ""),
                 "markdown": document.get("markdown", ""),
-                "created_at": document.get("created_at", "").isoformat() if document.get("created_at") else None,
                 "message_type": "raw_document",
                 "timestamp": time.time()
             }
             
             # Send to raw queue
-            message_body = json.dumps(raw_message, ensure_ascii=False, default=str)
+            original_queue = config.rabbitmq.queue
+            config.rabbitmq.queue = self.raw_queue
             
-            success = self.rabbitmq_handler.channel.basic_publish(
-                exchange="",
-                routing_key=self.raw_queue,
-                body=message_body,
-                properties=self.rabbitmq_handler.connection.BasicProperties(
-                    delivery_mode=2,  # Persistent
-                    content_type='application/json'
-                )
-            )
+            success = self.rabbitmq_handler.publish_message(raw_message)
+            
+            config.rabbitmq.queue = original_queue
             
             if success:
-                logger.debug(f"Sent raw document: {document['file_name']}")
-                return True
-            else:
-                logger.error(f"Failed to send raw document: {document['file_name']}")
-                return False
+                logger.debug(f"Sent to queue: {document.get('file_name', 'unknown')}")
+            
+            return success
                 
         except Exception as e:
-            logger.error(f"Error sending raw document: {e}")
+            logger.error(f"Error sending to queue: {e}")
             return False
     
-    def process_unprocessed_documents(self) -> int:
+    def process_batch(self) -> int:
         """
-        Process all unprocessed documents and send to RabbitMQ.
+        Send all unprocessed documents to queue.
         
         Returns:
             Number of documents sent
         """
         try:
-            # Get unprocessed documents
-            unprocessed_docs = list(self.collection.find({"processed": False}))
+            unprocessed_docs = self.pdf_extractor.get_unprocessed_documents()
             
             if not unprocessed_docs:
                 logger.info("No unprocessed documents found")
                 return 0
             
-            logger.info(f"Processing {len(unprocessed_docs)} unprocessed documents")
+            logger.info(f"Sending {len(unprocessed_docs)} documents to queue")
             
             sent_count = 0
-            
             for doc in unprocessed_docs:
-                if self.send_raw_document(doc):
+                if self.send_to_queue(doc):
                     sent_count += 1
-                    
-                    # Mark as processed (CDC processed, not chunked)
-                    self.collection.update_one(
-                        {"_id": doc["_id"]},
-                        {"$set": {"processed": True, "cdc_processed_at": time.time()}}
-                    )
-                    
-                    logger.debug(f"Marked document as CDC processed: {doc['file_name']}")
-                else:
-                    logger.error(f"Failed to send document: {doc['file_name']}")
             
-            logger.info(f"CDC processing completed. Sent {sent_count}/{len(unprocessed_docs)} documents")
+            logger.info(f"CDC batch complete: {sent_count}/{len(unprocessed_docs)} sent")
             return sent_count
             
         except Exception as e:
-            logger.error(f"Error in CDC processing: {e}")
+            logger.error(f"CDC batch processing error: {e}")
             return 0
     
-    def watch_changes(self, callback: Optional[callable] = None):
+    def watch_realtime(self, callback: Optional[Callable] = None):
         """
-        Watch for changes in MongoDB collection and send new documents.
+        Watch for new documents in MongoDB and send to queue.
         
         Args:
-            callback: Optional callback function for each change
+            callback: Optional callback for each document
         """
         try:
-            logger.info("Starting MongoDB change stream watch...")
+            logger.info("Starting CDC realtime watch...")
             
-            # Watch for insert operations
-            change_stream = self.collection.watch([
+            change_stream = self.pdf_extractor.collection.watch([
                 {"$match": {"operationType": "insert"}}
             ])
             
@@ -153,81 +123,59 @@ class CDCHandler:
                     document = change["fullDocument"]
                     logger.info(f"New document detected: {document.get('file_name', 'unknown')}")
                     
-                    # Send to RabbitMQ
-                    if self.send_raw_document(document):
-                        # Mark as CDC processed
-                        self.collection.update_one(
-                            {"_id": document["_id"]},
-                            {"$set": {"processed": True, "cdc_processed_at": time.time()}}
-                        )
-                        
+                    if self.send_to_queue(document):
                         if callback:
                             callback(document)
                     
                 except Exception as e:
-                    logger.error(f"Error processing change event: {e}")
+                    logger.error(f"Error processing change: {e}")
                     
         except KeyboardInterrupt:
-            logger.info("Change stream watch stopped by user")
+            logger.info("CDC watch stopped")
         except Exception as e:
-            logger.error(f"Error in change stream: {e}")
+            logger.error(f"CDC watch error: {e}")
         finally:
             change_stream.close()
     
     def get_queue_stats(self) -> Dict[str, Any]:
-        """
-        Get statistics about the raw document queue.
-        
-        Returns:
-            Queue statistics
-        """
+        """Get raw queue statistics."""
         try:
-            method = self.rabbitmq_handler.channel.queue_declare(
-                queue=self.raw_queue, 
-                passive=True
-            )
+            original_queue = config.rabbitmq.queue
+            config.rabbitmq.queue = self.raw_queue
             
-            return {
-                "queue_name": self.raw_queue,
-                "message_count": method.method.message_count,
-                "consumer_count": method.method.consumer_count
-            }
+            stats = self.rabbitmq_handler.get_queue_info()
+            config.rabbitmq.queue = original_queue
             
+            return stats
         except Exception as e:
             logger.error(f"Failed to get queue stats: {e}")
             return {}
     
     def purge_raw_queue(self) -> int:
-        """
-        Purge all messages from raw document queue.
-        
-        Returns:
-            Number of messages purged
-        """
+        """Purge raw queue."""
         try:
-            method = self.rabbitmq_handler.channel.queue_purge(queue=self.raw_queue)
-            purged_count = method.method.message_count
+            original_queue = config.rabbitmq.queue
+            config.rabbitmq.queue = self.raw_queue
             
-            logger.info(f"Purged {purged_count} messages from raw queue")
-            return purged_count
+            count = self.rabbitmq_handler.purge_queue()
+            config.rabbitmq.queue = original_queue
             
+            return count
         except Exception as e:
-            logger.error(f"Failed to purge raw queue: {e}")
+            logger.error(f"Failed to purge queue: {e}")
             return 0
     
     def close(self):
         """Close connections."""
         try:
-            self.mongo_client.close()
+            self.pdf_extractor.close()
             self.rabbitmq_handler.close()
-            logger.info("CDC Handler connections closed")
+            logger.info("CDC Handler closed")
         except Exception as e:
             logger.error(f"Error closing CDC Handler: {e}")
     
     def __enter__(self):
-        """Context manager entry."""
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
         self.close()

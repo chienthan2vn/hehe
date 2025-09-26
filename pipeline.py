@@ -82,8 +82,8 @@ class RAGPipeline:
         logger.info("=== Starting CDC Step ===")
         
         try:
-            # Process unprocessed documents and send to RabbitMQ raw queue
-            documents_sent = self.cdc_handler.process_unprocessed_documents()
+            # Process batch and send to RabbitMQ raw queue
+            documents_sent = self.cdc_handler.process_batch()
             
             logger.info(f"CDC step completed. Sent {documents_sent} raw documents to queue")
             return documents_sent
