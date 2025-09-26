@@ -48,13 +48,8 @@ class CDCHandler:
                 "timestamp": time.time()
             }
             
-            # Send to raw queue
-            original_queue = config.rabbitmq.queue
-            config.rabbitmq.queue = self.raw_queue
-            
-            success = self.rabbitmq_handler.publish_message(raw_message)
-            
-            config.rabbitmq.queue = original_queue
+            # Use helper method to publish to specific queue
+            success = self._publish_to_raw_queue(raw_message)
             
             if success:
                 logger.debug(f"Sent to queue: {document.get('file_name', 'unknown')}")
@@ -64,6 +59,15 @@ class CDCHandler:
         except Exception as e:
             logger.error(f"Error sending to queue: {e}")
             return False
+    
+    def _publish_to_raw_queue(self, message: Dict[str, Any]) -> bool:
+        """Helper method to publish to raw queue."""
+        original_queue = config.rabbitmq.queue
+        config.rabbitmq.queue = self.raw_queue
+        try:
+            return self.rabbitmq_handler.publish_message(message)
+        finally:
+            config.rabbitmq.queue = original_queue
     
     def process_batch(self) -> int:
         """
@@ -129,13 +133,7 @@ class CDCHandler:
     def get_queue_stats(self) -> Dict[str, Any]:
         """Get raw queue statistics."""
         try:
-            original_queue = config.rabbitmq.queue
-            config.rabbitmq.queue = self.raw_queue
-            
-            stats = self.rabbitmq_handler.get_queue_info()
-            config.rabbitmq.queue = original_queue
-            
-            return stats
+            return self._execute_on_raw_queue(self.rabbitmq_handler.get_queue_info)
         except Exception as e:
             logger.error(f"Failed to get queue stats: {e}")
             return {}
@@ -143,16 +141,19 @@ class CDCHandler:
     def purge_raw_queue(self) -> int:
         """Purge raw queue."""
         try:
-            original_queue = config.rabbitmq.queue
-            config.rabbitmq.queue = self.raw_queue
-            
-            count = self.rabbitmq_handler.purge_queue()
-            config.rabbitmq.queue = original_queue
-            
-            return count
+            return self._execute_on_raw_queue(self.rabbitmq_handler.purge_queue)
         except Exception as e:
             logger.error(f"Failed to purge queue: {e}")
             return 0
+    
+    def _execute_on_raw_queue(self, func):
+        """Helper method to execute function on raw queue."""
+        original_queue = config.rabbitmq.queue
+        config.rabbitmq.queue = self.raw_queue
+        try:
+            return func()
+        finally:
+            config.rabbitmq.queue = original_queue
     
     def close(self):
         """Close connections."""

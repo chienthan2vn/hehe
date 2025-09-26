@@ -12,10 +12,10 @@ from dataclasses import dataclass
 import bytewax.operators as op
 from bytewax.connectors.stdio import StdOutSink
 from bytewax.dataflow import Dataflow
-import pika
 
 from config import config
 from modules.text_chunker import TextChunker
+from modules.rabbitmq_handler import RabbitMQHandler
 
 logger = logging.getLogger(__name__)
 
@@ -41,46 +41,26 @@ class ChunkMessage:
     timestamp: float
 
 class RabbitMQSource:
-    """Custom RabbitMQ source for Bytewax."""
+    """Custom RabbitMQ source for Bytewax - reuses RabbitMQHandler."""
     
     def __init__(self, queue_name: str):
         self.queue_name = queue_name
-        self.connection = None
-        self.channel = None
-        self.setup_connection()
-    
-    def setup_connection(self):
-        """Setup RabbitMQ connection."""
-        try:
-            credentials = pika.PlainCredentials(
-                config.rabbitmq.username, 
-                config.rabbitmq.password
-            )
-            
-            connection_params = pika.ConnectionParameters(
-                host=config.rabbitmq.host,
-                port=config.rabbitmq.port,
-                virtual_host=config.rabbitmq.virtual_host,
-                credentials=credentials
-            )
-            
-            self.connection = pika.BlockingConnection(connection_params)
-            self.channel = self.connection.channel()
-            
-            # Declare queue
-            self.channel.queue_declare(queue=self.queue_name, durable=True)
-            self.channel.basic_qos(prefetch_count=1)
-            
-            logger.info(f"RabbitMQ source connected to queue: {self.queue_name}")
-            
-        except Exception as e:
-            logger.error(f"Failed to setup RabbitMQ source: {e}")
-            raise
+        # Temporarily change config to target specific queue
+        original_queue = config.rabbitmq.queue
+        config.rabbitmq.queue = queue_name
+        
+        self.rabbitmq_handler = RabbitMQHandler()
+        
+        # Restore original config
+        config.rabbitmq.queue = original_queue
+        
+        # Setup consumer-specific configurations
+        self.rabbitmq_handler.channel.basic_qos(prefetch_count=1)
     
     def __iter__(self):
         """Iterate over messages from RabbitMQ."""
         try:
-            for method_frame, properties, body in self.channel.consume(self.queue_name, auto_ack=False):
+            for method_frame, properties, body in self.rabbitmq_handler.channel.consume(self.queue_name, auto_ack=False):
                 if method_frame:
                     try:
                         # Parse message
@@ -96,17 +76,17 @@ class RabbitMQSource:
                         )
                         
                         # Acknowledge message
-                        self.channel.basic_ack(method_frame.delivery_tag)
+                        self.rabbitmq_handler.channel.basic_ack(method_frame.delivery_tag)
                         
                         # Yield with key (document_id) and value
                         yield (doc_message.document_id, doc_message)
                         
                     except json.JSONDecodeError as e:
                         logger.error(f"Failed to parse message JSON: {e}")
-                        self.channel.basic_nack(method_frame.delivery_tag, requeue=False)
+                        self.rabbitmq_handler.channel.basic_nack(method_frame.delivery_tag, requeue=False)
                     except Exception as e:
                         logger.error(f"Error processing message: {e}")
-                        self.channel.basic_nack(method_frame.delivery_tag, requeue=True)
+                        self.rabbitmq_handler.channel.basic_nack(method_frame.delivery_tag, requeue=True)
                 
         except KeyboardInterrupt:
             logger.info("RabbitMQ source stopped by user")
@@ -117,14 +97,7 @@ class RabbitMQSource:
     
     def close(self):
         """Close RabbitMQ connection."""
-        try:
-            if self.channel:
-                self.channel.close()
-            if self.connection:
-                self.connection.close()
-            logger.info("RabbitMQ source connection closed")
-        except Exception as e:
-            logger.error(f"Error closing RabbitMQ source: {e}")
+        self.rabbitmq_handler.close()
 
 def chunk_document(item: Tuple[str, DocumentMessage]) -> List[Tuple[str, ChunkMessage]]:
     """Chunk document into smaller pieces."""
@@ -160,7 +133,7 @@ def chunk_document(item: Tuple[str, DocumentMessage]) -> List[Tuple[str, ChunkMe
         return []
 
 def store_chunk(item: Tuple[str, ChunkMessage]) -> Tuple[str, ChunkMessage]:
-    """Store chunk in Qdrant."""
+    """Store chunk in Qdrant - reuses QdrantHandler."""
     chunk_id, chunk_message = item
     
     try:
@@ -168,10 +141,10 @@ def store_chunk(item: Tuple[str, ChunkMessage]) -> Tuple[str, ChunkMessage]:
         from modules.qdrant_handler import QdrantHandler
         from qdrant_client.http.models import PointStruct
         
-        # Initialize Qdrant handler
+        # Reuse QdrantHandler
         qdrant_handler = QdrantHandler()
         
-        # Generate embedding
+        # Generate embedding using handler's model
         embedding = qdrant_handler.embedding_model.encode(chunk_message.text).tolist()
         
         # Create point
@@ -188,7 +161,7 @@ def store_chunk(item: Tuple[str, ChunkMessage]) -> Tuple[str, ChunkMessage]:
             }
         )
         
-        # Store in Qdrant
+        # Store in Qdrant using handler's client
         qdrant_handler.client.upsert(
             collection_name=qdrant_handler.collection_name,
             points=[point]
