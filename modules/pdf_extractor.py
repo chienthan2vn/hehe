@@ -8,7 +8,6 @@ import logging
 from typing import List, Dict, Any
 from docling.document_converter import DocumentConverter
 from pymongo import MongoClient
-from pymongo.collection import Collection
 
 from config import config
 
@@ -24,15 +23,7 @@ class PDFExtractor:
         self.collection = self.db[config.mongo.collection]
     
     def extract_pdf_to_markdown(self, pdf_path: str) -> str:
-        """
-        Extract text from PDF and convert to markdown.
-        
-        Args:
-            pdf_path: Path to the PDF file
-            
-        Returns:
-            Extracted markdown content
-        """
+        """Extract text from PDF and convert to markdown."""
         try:
             result = self.converter.convert(pdf_path)
             doc = result.document
@@ -42,16 +33,7 @@ class PDFExtractor:
             raise
     
     def store_markdown_to_mongo(self, pdf_path: str, markdown_content: str) -> str:
-        """
-        Store markdown content to MongoDB.
-        
-        Args:
-            pdf_path: Original PDF file path
-            markdown_content: Extracted markdown content
-            
-        Returns:
-            MongoDB document ID
-        """
+        """Store markdown content to MongoDB."""
         try:
             record = {
                 "file_name": os.path.basename(pdf_path),
@@ -69,43 +51,8 @@ class PDFExtractor:
             logger.error(f"Error storing to MongoDB: {e}")
             raise
     
-    def process_single_pdf(self, pdf_path: str) -> str:
-        """
-        Process a single PDF file: extract and store.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            MongoDB document ID
-        """
-        if not os.path.exists(pdf_path):
-            raise FileNotFoundError(f"PDF file not found: {pdf_path}")
-        
-        if not pdf_path.lower().endswith('.pdf'):
-            raise ValueError(f"File is not a PDF: {pdf_path}")
-        
-        logger.info(f"Processing PDF: {pdf_path}")
-        
-        # Extract markdown
-        markdown_content = self.extract_pdf_to_markdown(pdf_path)
-        
-        # Store to MongoDB
-        doc_id = self.store_markdown_to_mongo(pdf_path, markdown_content)
-        
-        logger.info(f"Successfully processed PDF: {pdf_path}")
-        return doc_id
-    
     def process_pdf_directory(self, directory_path: str) -> List[str]:
-        """
-        Process all PDF files in a directory.
-        
-        Args:
-            directory_path: Path to directory containing PDF files
-            
-        Returns:
-            List of MongoDB document IDs
-        """
+        """Process all PDF files in a directory."""
         if not os.path.exists(directory_path):
             raise FileNotFoundError(f"Directory not found: {directory_path}")
         
@@ -123,8 +70,12 @@ class PDFExtractor:
         for pdf_file in pdf_files:
             pdf_path = os.path.join(directory_path, pdf_file)
             try:
-                doc_id = self.process_single_pdf(pdf_path)
+                # Extract and store
+                logger.info(f"Processing PDF: {pdf_path}")
+                markdown_content = self.extract_pdf_to_markdown(pdf_path)
+                doc_id = self.store_markdown_to_mongo(pdf_path, markdown_content)
                 processed_ids.append(doc_id)
+                logger.info(f"Successfully processed PDF: {pdf_path}")
             except Exception as e:
                 logger.error(f"Failed to process {pdf_path}: {e}")
                 failed_files.append(pdf_path)
@@ -136,35 +87,12 @@ class PDFExtractor:
         return processed_ids
     
     def get_unprocessed_documents(self) -> List[Dict[str, Any]]:
-        """
-        Get documents from MongoDB that haven't been processed yet.
-        
-        Returns:
-            List of unprocessed documents
-        """
+        """Get documents from MongoDB that haven't been processed yet."""
         try:
             cursor = self.collection.find({"processed": False})
             return list(cursor)
         except Exception as e:
             logger.error(f"Error fetching unprocessed documents: {e}")
-            raise
-    
-    def mark_document_processed(self, doc_id: str):
-        """
-        Mark a document as processed.
-        
-        Args:
-            doc_id: MongoDB document ID
-        """
-        try:
-            from bson import ObjectId
-            self.collection.update_one(
-                {"_id": ObjectId(doc_id)},
-                {"$set": {"processed": True, "processed_at": datetime.datetime.utcnow()}}
-            )
-            logger.info(f"Marked document {doc_id} as processed")
-        except Exception as e:
-            logger.error(f"Error marking document as processed: {e}")
             raise
     
     def close(self):

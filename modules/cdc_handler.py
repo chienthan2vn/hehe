@@ -25,19 +25,8 @@ class CDCHandler:
         
         # Raw queue for unprocessed documents
         self.raw_queue = config.rabbitmq.queue + "_raw"
-        self._setup_raw_queue()
-    
-    def _setup_raw_queue(self):
-        """Setup the raw document queue."""
-        try:
-            self.rabbitmq_handler.channel.queue_declare(
-                queue=self.raw_queue, 
-                durable=True
-            )
-            logger.info(f"Raw document queue ready: {self.raw_queue}")
-        except Exception as e:
-            logger.error(f"Failed to setup raw queue: {e}")
-            raise
+        
+        logger.info(f"CDC Handler initialized with raw queue: {self.raw_queue}")
     
     def send_to_queue(self, document: Dict[str, Any]) -> bool:
         """

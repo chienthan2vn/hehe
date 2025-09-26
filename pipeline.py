@@ -229,8 +229,8 @@ class RAGPipeline:
             if self.pdf_extractor:
                 self.pdf_extractor.close()
             
-            if self.rabbitmq_handler:
-                self.rabbitmq_handler.close()
+            if self.cdc_handler:
+                self.cdc_handler.close()
             
             logger.info("Pipeline cleanup completed")
             

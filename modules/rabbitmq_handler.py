@@ -5,15 +5,14 @@ RabbitMQ message queue handler for the pipeline.
 import json
 import logging
 import pika
-from typing import Dict, Any, Callable, Optional
-from pika.adapters.blocking_connection import BlockingChannel
+from typing import Dict, Any
 
 from config import config
 
 logger = logging.getLogger(__name__)
 
 class RabbitMQHandler:
-    """Handles RabbitMQ connections, publishing and consuming."""
+    """Handles RabbitMQ connections and publishing."""
     
     def __init__(self):
         self.connection = None
@@ -82,97 +81,6 @@ class RabbitMQHandler:
         except Exception as e:
             logger.error(f"Failed to publish message: {e}")
             return False
-    
-    def publish_chunks(self, chunks: list) -> int:
-        """
-        Publish multiple chunk messages to the queue.
-        
-        Args:
-            chunks: List of chunk dictionaries
-            
-        Returns:
-            Number of successfully published chunks
-        """
-        published_count = 0
-        failed_count = 0
-        
-        for chunk in chunks:
-            if self.publish_message(chunk):
-                published_count += 1
-            else:
-                failed_count += 1
-        
-        logger.info(f"Published {published_count} chunks, {failed_count} failed")
-        return published_count
-    
-    def setup_consumer(self, callback_function: Callable, auto_ack: bool = False):
-        """
-        Setup message consumer with callback.
-        
-        Args:
-            callback_function: Function to handle incoming messages
-            auto_ack: Whether to auto-acknowledge messages
-        """
-        try:
-            if not self.channel:
-                self.setup_connection()
-            
-            # Set QoS to process one message at a time
-            self.channel.basic_qos(prefetch_count=1)
-            
-            def wrapper_callback(ch, method, properties, body):
-                """Wrapper callback to handle message parsing and acknowledgment."""
-                try:
-                    # Parse JSON message
-                    message = json.loads(body.decode('utf-8'))
-                    
-                    # Call the user-provided callback
-                    result = callback_function(message)
-                    
-                    # Acknowledge message if auto_ack is False and callback succeeded
-                    if not auto_ack and result is not False:
-                        ch.basic_ack(delivery_tag=method.delivery_tag)
-                        logger.debug(f"Acknowledged message: {message.get('id', 'unknown')}")
-                    
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse message JSON: {e}")
-                    if not auto_ack:
-                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-                
-                except Exception as e:
-                    logger.error(f"Error in message callback: {e}")
-                    if not auto_ack:
-                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-            
-            self.channel.basic_consume(
-                queue=config.rabbitmq.queue,
-                on_message_callback=wrapper_callback,
-                auto_ack=auto_ack
-            )
-            
-            logger.info("Consumer setup complete")
-            
-        except Exception as e:
-            logger.error(f"Failed to setup consumer: {e}")
-            raise
-    
-    def start_consuming(self):
-        """Start consuming messages."""
-        try:
-            logger.info("Starting to consume messages...")
-            self.channel.start_consuming()
-        except KeyboardInterrupt:
-            logger.info("Stopping consumer...")
-            self.stop_consuming()
-        except Exception as e:
-            logger.error(f"Error while consuming: {e}")
-            raise
-    
-    def stop_consuming(self):
-        """Stop consuming messages."""
-        if self.channel:
-            self.channel.stop_consuming()
-            logger.info("Stopped consuming messages")
     
     def get_queue_info(self) -> Dict[str, Any]:
         """

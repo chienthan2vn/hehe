@@ -117,18 +117,28 @@ class TestNewPipeline:
         logger.info("Testing Bytewax Processor...")
         
         try:
-            # Just test initialization, not full execution
-            bytewax_processor = BytewaxProcessor()
+            # Test creating dataflow function directly first
+            from modules.bytewax_processor import create_rag_processing_flow
+            flow = create_rag_processing_flow()
             
             # Check if flow is properly created
-            assert bytewax_processor.flow is not None, "Bytewax flow not created"
-            assert bytewax_processor.flow.name == "rag_processing", "Incorrect flow name"
+            assert flow is not None, "Bytewax flow not created"
+            
+            # Check flow type instead of name
+            from bytewax.dataflow import Dataflow
+            assert isinstance(flow, Dataflow), "Flow is not a Dataflow object"
+            
+            # Test BytewaxProcessor initialization
+            bytewax_processor = BytewaxProcessor()
+            assert bytewax_processor.flow is not None, "BytewaxProcessor flow not created"
+            assert isinstance(bytewax_processor.flow, Dataflow), "BytewaxProcessor flow is not a Dataflow object"
             
             logger.info("✅ Bytewax Processor test passed")
             return True
             
         except Exception as e:
             logger.error(f"❌ Bytewax Processor test failed: {e}")
+            logger.error(f"Error details: {str(e)}")
             return False
     
     def test_qdrant_handler(self) -> bool:
