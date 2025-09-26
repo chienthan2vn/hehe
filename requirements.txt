@@ -1,0 +1,7 @@
+docling
+pymongo
+pika
+qdrant-client
+sentence-transformers
+numpy
+bytewax
