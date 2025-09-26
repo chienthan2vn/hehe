@@ -23,7 +23,7 @@ class QdrantHandler:
         self.collection_name = config.qdrant.collection_name
         self.vector_size = config.qdrant.vector_size
         
-        # Initialize embedding model
+        # Initialize embedding model (needed by Bytewax)
         self.embedding_model = SentenceTransformer(config.embedding.model_name)
         
         # Ensure collection exists

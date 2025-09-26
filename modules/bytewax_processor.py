@@ -6,7 +6,7 @@ Handles chunking, embedding generation, and Qdrant storage.
 import json
 import logging
 import time
-from typing import Dict, Any, List, Optional, Iterator, Tuple
+from typing import Dict, Any, List, Tuple
 from dataclasses import dataclass
 
 import bytewax.operators as op
@@ -16,8 +16,6 @@ import pika
 
 from config import config
 from modules.text_chunker import TextChunker
-from modules.qdrant_handler import QdrantHandler
-from modules.rabbitmq_handler import RabbitMQHandler
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +77,7 @@ class RabbitMQSource:
             logger.error(f"Failed to setup RabbitMQ source: {e}")
             raise
     
-    def __iter__(self) -> Iterator[Tuple[str, DocumentMessage]]:
+    def __iter__(self):
         """Iterate over messages from RabbitMQ."""
         try:
             for method_frame, properties, body in self.channel.consume(self.queue_name, auto_ack=False):
@@ -105,12 +103,9 @@ class RabbitMQSource:
                         
                     except json.JSONDecodeError as e:
                         logger.error(f"Failed to parse message JSON: {e}")
-                        # Reject and don't requeue malformed messages
                         self.channel.basic_nack(method_frame.delivery_tag, requeue=False)
-                    
                     except Exception as e:
                         logger.error(f"Error processing message: {e}")
-                        # Reject and requeue for retry
                         self.channel.basic_nack(method_frame.delivery_tag, requeue=True)
                 
         except KeyboardInterrupt:
@@ -131,82 +126,18 @@ class RabbitMQSource:
         except Exception as e:
             logger.error(f"Error closing RabbitMQ source: {e}")
 
-class QdrantSink:
-    """Custom Qdrant sink for Bytewax."""
-    
-    def __init__(self):
-        self.qdrant_handler = QdrantHandler()
-        self.batch_size = 10
-        self.batch = []
-        
-    def write(self, chunk_message: ChunkMessage):
-        """Write chunk to Qdrant."""
-        try:
-            # Convert to dict format expected by Qdrant handler
-            chunk_data = {
-                "id": chunk_message.chunk_id,
-                "text": chunk_message.text,
-                "document_id": chunk_message.document_id,
-                "chunk_index": chunk_message.chunk_index,
-                "word_count": chunk_message.word_count,
-                "char_count": chunk_message.char_count,
-                "chunk_method": chunk_message.chunk_method
-            }
-            
-            # Add to batch
-            self.batch.append(chunk_data)
-            
-            # Process batch when full
-            if len(self.batch) >= self.batch_size:
-                self._process_batch()
-                
-        except Exception as e:
-            logger.error(f"Error writing to Qdrant sink: {e}")
-    
-    def _process_batch(self):
-        """Process accumulated batch."""
-        if self.batch:
-            try:
-                stored_count = self.qdrant_handler.store_chunks_batch(self.batch)
-                logger.info(f"Stored {stored_count} chunks in batch")
-                self.batch.clear()
-            except Exception as e:
-                logger.error(f"Error processing batch: {e}")
-    
-    def flush(self):
-        """Flush remaining batch."""
-        if self.batch:
-            self._process_batch()
-    
-    def close(self):
-        """Close sink and flush remaining data."""
-        self.flush()
-        logger.info("Qdrant sink closed")
-
 def chunk_document(item: Tuple[str, DocumentMessage]) -> List[Tuple[str, ChunkMessage]]:
-    """
-    Chunk document into smaller pieces.
-    
-    Args:
-        item: Tuple of (document_id, DocumentMessage)
-        
-    Returns:
-        List of chunked messages
-    """
+    """Chunk document into smaller pieces."""
     document_id, doc_message = item
     
     try:
-        # Initialize text chunker
         chunker = TextChunker()
-        
-        # Chunk the markdown text
         chunks = chunker.chunk_text_with_metadata(
             text=doc_message.markdown,
             document_id=document_id,
             chunk_method="words"
         )
         
-        # Convert to ChunkMessage objects
         chunk_messages = []
         for chunk_data in chunks:
             chunk_message = ChunkMessage(
@@ -228,39 +159,42 @@ def chunk_document(item: Tuple[str, DocumentMessage]) -> List[Tuple[str, ChunkMe
         logger.error(f"Error chunking document {document_id}: {e}")
         return []
 
-def log_chunk(item: Tuple[str, ChunkMessage]) -> Tuple[str, ChunkMessage]:
-    """Log chunk processing."""
-    chunk_id, chunk_message = item
-    logger.debug(f"Processing chunk: {chunk_id} from document: {chunk_message.document_id}")
-    return item
-
 def store_chunk(item: Tuple[str, ChunkMessage]) -> Tuple[str, ChunkMessage]:
     """Store chunk in Qdrant."""
     chunk_id, chunk_message = item
     
     try:
-        # Initialize Qdrant handler (should be reused in production)
+        # Import here to avoid circular dependency
+        from modules.qdrant_handler import QdrantHandler
+        from qdrant_client.http.models import PointStruct
+        
+        # Initialize Qdrant handler
         qdrant_handler = QdrantHandler()
         
-        # Convert to dict format
-        chunk_data = {
-            "id": chunk_message.chunk_id,
-            "text": chunk_message.text,
-            "document_id": chunk_message.document_id,
-            "chunk_index": chunk_message.chunk_index,
-            "word_count": chunk_message.word_count,
-            "char_count": chunk_message.char_count,
-            "chunk_method": chunk_message.chunk_method
-        }
+        # Generate embedding
+        embedding = qdrant_handler.embedding_model.encode(chunk_message.text).tolist()
+        
+        # Create point
+        point = PointStruct(
+            id=chunk_message.chunk_id,
+            vector=embedding,
+            payload={
+                "text": chunk_message.text,
+                "document_id": chunk_message.document_id,
+                "chunk_index": chunk_message.chunk_index,
+                "word_count": chunk_message.word_count,
+                "char_count": chunk_message.char_count,
+                "chunk_method": chunk_message.chunk_method
+            }
+        )
         
         # Store in Qdrant
-        success = qdrant_handler.store_chunk(chunk_data)
+        qdrant_handler.client.upsert(
+            collection_name=qdrant_handler.collection_name,
+            points=[point]
+        )
         
-        if success:
-            logger.debug(f"Stored chunk: {chunk_id}")
-        else:
-            logger.error(f"Failed to store chunk: {chunk_id}")
-            
+        logger.debug(f"Stored chunk: {chunk_id}")
         return item
         
     except Exception as e:
@@ -268,13 +202,7 @@ def store_chunk(item: Tuple[str, ChunkMessage]) -> Tuple[str, ChunkMessage]:
         return item
 
 def create_rag_processing_flow() -> Dataflow:
-    """
-    Create the main RAG processing Bytewax dataflow.
-    
-    Returns:
-        Configured Bytewax Dataflow
-    """
-    # Create dataflow
+    """Create the main RAG processing Bytewax dataflow."""
     flow = Dataflow("rag_processing")
     
     # Input: Raw documents from RabbitMQ
@@ -287,11 +215,8 @@ def create_rag_processing_flow() -> Dataflow:
     # Transform 1: Chunk documents
     chunked_stream = op.flat_map("chunk_documents", input_stream, chunk_document)
     
-    # Transform 2: Log processing
-    logged_stream = op.map("log_chunks", chunked_stream, log_chunk)
-    
-    # Transform 3: Store in Qdrant
-    stored_stream = op.map("store_chunks", logged_stream, store_chunk)
+    # Transform 2: Store in Qdrant
+    stored_stream = op.map("store_chunks", chunked_stream, store_chunk)
     
     # Output: Log results
     op.output("output", stored_stream, StdOutSink())
@@ -309,10 +234,8 @@ class BytewaxProcessor:
         logger.info("Starting Bytewax RAG processing pipeline...")
         
         try:
-            # Run the dataflow (this will block)
             import bytewax.run
             bytewax.run.main(self.flow)
-            
         except KeyboardInterrupt:
             logger.info("Bytewax pipeline stopped by user")
         except Exception as e:
@@ -321,11 +244,3 @@ class BytewaxProcessor:
 
 # Global flow variable for Bytewax CLI
 flow = create_rag_processing_flow()
-
-def main():
-    """Main function for testing."""
-    processor = BytewaxProcessor()
-    processor.run()
-
-if __name__ == "__main__":
-    main()
